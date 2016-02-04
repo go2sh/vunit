@@ -9,9 +9,11 @@ Verilog parsing functionality
 """
 from os.path import join, exists
 
-from vunit.parsing.tokenizer import TokenStream
+from vunit.parsing.tokenizer import TokenStream, describe_location
 import vunit.parsing.verilog.tokenizer as tokenizer
 from vunit.parsing.verilog.tokenizer import tokenize
+import logging
+LOGGER = logging.getLogger(__name__)
 
 
 def preprocess(tokens, defines=None, include_paths=None, included_files=None):
@@ -31,12 +33,42 @@ def preprocess(tokens, defines=None, include_paths=None, included_files=None):
             continue
 
         if token.value == "define":
-            macro = define(stream)
-            defines[macro.name] = macro
+            macro = define(token, stream)
+            if macro is not None:
+                defines[macro.name] = macro
 
         if token.value == "include":
-            stream.skip_until(tokenizer.STRING)
-            file_name = stream.pop().value
+            stream.skip_while(tokenizer.WHITESPACE)
+
+            tok = stream.pop()
+            if tok is None:
+                LOGGER.debug("Broken `include eof reached")
+                continue
+
+            if tok.kind == tokenizer.PREPROCESSOR:
+                if tok.value in defines:
+                    macro = defines[tok.value]
+                else:
+                    LOGGER.debug("Broken `include has bad argument %r", tok)
+                    continue
+
+                expanded_tokens = macro.expand_from_stream(stream)
+
+                if len(expanded_tokens) == 0:
+                    LOGGER.debug("Broken `include has bad argument %r", tok)
+                    continue
+
+                if expanded_tokens[0].kind != tokenizer.STRING:
+                    LOGGER.debug("Broken `include has bad argument %r", expanded_tokens[0])
+                    continue
+
+                file_name = expanded_tokens[0].value
+
+            elif tok.kind == tokenizer.STRING:
+                file_name = tok.value
+            else:
+                LOGGER.debug("Broken `include has bad argument %r", tok)
+                continue
 
             full_name = None
             for include_path in include_paths:
@@ -44,7 +76,9 @@ def preprocess(tokens, defines=None, include_paths=None, included_files=None):
                 if exists(full_name):
                     break
             else:
-                assert False
+                LOGGER.debug("Could not file verilog `include file %s",
+                             file_name)
+                continue
             included_files.append(full_name)
             with open(full_name, "r") as fptr:
                 included_tokens = tokenize(fptr.read())
@@ -52,28 +86,35 @@ def preprocess(tokens, defines=None, include_paths=None, included_files=None):
 
         elif token.value in defines:
             macro = defines[token.value]
-            if macro.num_args == 0:
-                values = []
-            else:
-                values = parse_macro_actuals(stream)
-            result += macro.expand(values)
+            result += macro.expand_from_stream(stream)
 
     return result
 
 
-def define(stream):
+def define(define_token, stream):
     """
     Handle a `define directive
     """
     stream.skip_while(tokenizer.WHITESPACE)
     name_token = stream.pop()
-    assert name_token.kind == tokenizer.IDENTIFIER
+
+    if name_token is None or (name_token.kind in (tokenizer.NEWLINE,)):
+        LOGGER.warning("Verilog `define without argument\n%s",
+                       describe_location(define_token.location))
+        return None
+
+    if name_token.kind != tokenizer.IDENTIFIER:
+        LOGGER.warning("Verilog `define invalid name\n%s",
+                       describe_location(name_token.location))
+        return None
+
     name = name_token.value
 
-    if stream.eof:
+    token = stream.pop()
+    if token is None:
+        # Empty define
         return Macro(name)
 
-    token = stream.pop()
     if token.kind in (tokenizer.WHITESPACE, tokenizer.NEWLINE):
         # Define without arguments
         args = tuple()
@@ -86,13 +127,21 @@ def define(stream):
                 argname = token.value
                 args = args + (argname,)
                 token = stream.pop()
-                if token.kind == tokenizer.EQUAL:
+                if token is None:
+                    LOGGER.debug("Broken verilog `define argument list")
+                    return None
+                elif token.kind == tokenizer.EQUAL:
                     token = stream.pop()
                     defaults[argname] = [token]
                     token = stream.pop()
             else:
                 token = stream.pop()
 
+            if token is None:
+                LOGGER.debug("Broken verilog `define argument list")
+                return None
+
+    stream.skip_while(tokenizer.WHITESPACE)
     start = stream.idx
     end = stream.skip_until(tokenizer.NEWLINE)
     if not stream.eof:
@@ -101,28 +150,6 @@ def define(stream):
                  tokens=stream.slice(start, end),
                  args=args,
                  defaults=defaults)
-
-
-def parse_macro_actuals(stream):
-    """
-    Parse the actual values of macro call such as
-    1 2 in `macro(1, 2)
-    """
-    token = stream.pop()
-    assert token.kind == tokenizer.LPAR
-    token = stream.pop()
-
-    value = []
-    values = []
-    while token.kind != tokenizer.RPAR:
-        if token.kind == tokenizer.COMMA:
-            values.append(value)
-            value = []
-        else:
-            value.append(token)
-        token = stream.pop()
-    values.append(value)
-    return values
 
 
 class Macro(object):
@@ -152,6 +179,11 @@ class Macro(object):
             if token.kind == tokenizer.IDENTIFIER and token.value in self.args:
                 idx = self.args.index(token.value)
                 if idx >= len(values):
+                    if token.value not in self.defaults:
+                        LOGGER.debug("Broken verilog `define %s no default for %s",
+                                     self.name,
+                                     token.value)
+                        return []
                     value = self.defaults[token.value]
                 else:
                     value = values[idx]
@@ -165,3 +197,46 @@ class Macro(object):
                 (self.tokens == other.tokens) and
                 (self.args == other.args) and
                 (self.defaults == other.defaults))
+
+    def expand_from_stream(self, stream):
+        """
+        Expand macro consuming arguments from the stream
+        returns the expanded tokens
+        """
+        if self.num_args == 0:
+            values = []
+        else:
+            values = self._parse_macro_actuals(stream)
+            if values is None:
+                return []
+        return self.expand(values)
+
+    @staticmethod
+    def _parse_macro_actuals(stream):
+        """
+        Parse the actual values of macro call such as
+        1 2 in `macro(1, 2)
+        """
+        token = stream.pop()
+        if token is None:
+            return None
+        if token.kind != tokenizer.LPAR:
+            return None
+        token = stream.pop()
+        if token is None:
+            return None
+
+        value = []
+        values = []
+        while token.kind != tokenizer.RPAR:
+            if token.kind == tokenizer.COMMA:
+                values.append(value)
+                value = []
+            else:
+                value.append(token)
+            token = stream.pop()
+            if token is None:
+                return None
+
+        values.append(value)
+        return values

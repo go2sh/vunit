@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2015, Lars Asplund lars.anders.asplund@gmail.com
 
+# pylint: disable=too-many-public-methods
+
 """
 Test of the Verilog preprocessor
 """
@@ -15,6 +17,7 @@ from vunit.ostools import renew_path
 from unittest import TestCase
 from vunit.parsing.verilog.preprocess import preprocess, Macro
 from vunit.parsing.verilog.tokenizer import tokenize
+from vunit.test.mock_2or3 import mock
 
 
 class TestVerilogPreprocessor(TestCase):
@@ -39,6 +42,66 @@ class TestVerilogPreprocessor(TestCase):
         self.assertEqual(tokens, [])
         self.assertEqual(defines, {"foo": Macro("foo")})
 
+    @mock.patch("vunit.parsing.verilog.preprocess.LOGGER", autospec=True)
+    def test_preprocess_broken_define(self, logger):
+        defines = {}
+        tokens = preprocess_loc("`define", defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+        logger.warning.assert_called_once_with(
+            "Verilog `define without argument\n%s",
+            "from fn.v line 1:\n"
+            "`define\n"
+            "~~~~~~~")
+
+    @mock.patch("vunit.parsing.verilog.preprocess.LOGGER", autospec=True)
+    def test_preprocess_broken_define_first_argument(self, logger):
+        defines = {}
+        tokens = preprocess_loc('`define "foo"', defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+        logger.warning.assert_called_once_with(
+            "Verilog `define invalid name\n%s",
+            "from fn.v line 1:\n"
+            '`define "foo"\n'
+            "        ~~~~~")
+
+    def test_preprocess_broken_define_argument_list(self):
+        defines = {}
+        tokens = preprocess(tokenize('`define foo('), defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+
+        defines = {}
+        tokens = preprocess(tokenize('`define foo(a'), defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+
+        defines = {}
+        tokens = preprocess(tokenize('`define foo(a='), defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+
+        defines = {}
+        tokens = preprocess(tokenize('`define foo(a=b'), defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+
+        defines = {}
+        tokens = preprocess(tokenize('`define foo(a=)'), defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+
+        defines = {}
+        tokens = preprocess(tokenize('`define foo("a"'), defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+
+        defines = {}
+        tokens = preprocess(tokenize('`define foo("a"='), defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines, {})
+
     def test_preprocess_define_with_value(self):
         defines = {}
         tokens = preprocess(tokenize("`define foo bar \"abc\""), defines)
@@ -54,6 +117,13 @@ class TestVerilogPreprocessor(TestCase):
     def test_preprocess_define_with_one_arg(self):
         defines = {}
         tokens = preprocess(tokenize("`define foo(arg)arg 123"), defines)
+        self.assertEqual(tokens, [])
+        self.assertEqual(defines,
+                         {"foo": Macro("foo", tokenize("arg 123"), args=("arg",))})
+
+    def test_preprocess_define_with_one_arg_ignores_initial_space(self):
+        defines = {}
+        tokens = preprocess(tokenize("`define foo(arg) arg 123"), defines)
         self.assertEqual(tokens, [])
         self.assertEqual(defines,
                          {"foo": Macro("foo", tokenize("arg 123"), args=("arg",))})
@@ -100,6 +170,27 @@ class TestVerilogPreprocessor(TestCase):
 `foo(1)"""), defines)
         self.assertEqual(tokens, tokenize("1 default"))
 
+    def test_preprocess_substitute_define_broken_args(self):
+        tokens = preprocess(tokenize("""\
+`define foo(arg1, arg2)arg1,arg2
+`foo(1 2)"""))
+        self.assertEqual(tokens, tokenize(""))
+
+        tokens = preprocess(tokenize("""\
+`define foo(arg1, arg2)arg1,arg2
+`foo"""))
+        self.assertEqual(tokens, tokenize(""))
+
+        tokens = preprocess(tokenize("""\
+`define foo(arg1, arg2)arg1,arg2
+`foo("""))
+        self.assertEqual(tokens, tokenize(""))
+
+        tokens = preprocess(tokenize("""\
+`define foo(arg1, arg2)arg1,arg2
+`foo(1"""))
+        self.assertEqual(tokens, tokenize(""))
+
     def test_preprocess_include_directive(self):
         self.write_file("include.svh", "hello hey")
         included_files = []
@@ -108,6 +199,63 @@ class TestVerilogPreprocessor(TestCase):
                             included_files=included_files)
         self.assertEqual(tokens, tokenize("hello hey"))
         self.assertEqual(included_files, [join(self.output_path, "include.svh")])
+
+    def test_preprocess_include_directive_missing_file(self):
+        included_files = []
+        tokens = preprocess(tokenize('`include "missing.svh"'),
+                            include_paths=[self.output_path],
+                            included_files=included_files)
+        self.assertEqual(tokens, tokenize(""))
+        self.assertEqual(included_files, [])
+
+    def test_preprocess_include_directive_missing_argument(self):
+        included_files = []
+        tokens = preprocess(tokenize('`include'),
+                            include_paths=[self.output_path],
+                            included_files=included_files)
+        self.assertEqual(tokens, tokenize(""))
+        self.assertEqual(included_files, [])
+
+    def test_preprocess_include_directive_bad_argument_ignored(self):
+        included_files = []
+        self.write_file("include.svh", "hello hey")
+        tokens = preprocess(tokenize('`include foo "include.svh"'),
+                            include_paths=[self.output_path],
+                            included_files=included_files)
+        self.assertEqual(tokens, tokenize(' "include.svh"'))
+        self.assertEqual(included_files, [])
+
+    def test_preprocess_include_directive_from_define(self):
+        included_files = []
+        self.write_file("include.svh", "hello hey")
+        tokens = preprocess(tokenize('''\
+`define inc "include.svh"
+`include `inc'''),
+                            include_paths=[self.output_path],
+                            included_files=included_files)
+        self.assertEqual(tokens, tokenize('hello hey'))
+        self.assertEqual(included_files, [join(self.output_path, "include.svh")])
+
+    def test_preprocess_include_directive_from_define_with_args(self):
+        included_files = []
+        self.write_file("include.svh", "hello hey")
+        tokens = preprocess(tokenize('''\
+`define inc(a) a
+`include `inc("include.svh")'''),
+                            include_paths=[self.output_path],
+                            included_files=included_files)
+        self.assertEqual(tokens, tokenize('hello hey'))
+        self.assertEqual(included_files, [join(self.output_path, "include.svh")])
+
+    def test_preprocess_include_directive_from_define_broken(self):
+        included_files = []
+        tokens = preprocess(tokenize('''\
+`define inc foo
+`include `inc'''),
+                            include_paths=[self.output_path],
+                            included_files=included_files)
+        self.assertEqual(tokens, tokenize(''))
+        self.assertEqual(included_files, [])
 
     def write_file(self, file_name, contents):
         """
@@ -119,3 +267,20 @@ class TestVerilogPreprocessor(TestCase):
             os.makedirs(dirname(full_path))
         with open(full_name, "w") as fptr:
             fptr.write(contents)
+
+
+def preprocess_loc(code, defines, file_name="fn.v"):
+    """
+    Preprocess with location information
+    """
+
+    tokens = tokenize(code, file_name=file_name, create_locations=True)
+
+    with mock.patch("vunit.parsing.tokenizer.read_file", autospec=True) as mock_read_file:
+        with mock.patch("vunit.parsing.tokenizer.file_exists", autospec=True) as mock_file_exists:
+            mock_file_exists.return_value = True
+            mock_read_file.return_value = code
+            tokens = preprocess(tokens, defines)
+            mock_file_exists.assert_called_once_with(file_name)
+            mock_read_file.assert_called_once_with(file_name)
+            return tokens

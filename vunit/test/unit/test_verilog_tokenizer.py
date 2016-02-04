@@ -118,3 +118,14 @@ class TestVerilogTokenizer(TestCase):
                          [Token(tokenizer.PARAMETER, value='')])
         self.assertEqual(list(tokenize("import")),
                          [Token(tokenizer.IMPORT, value='')])
+
+    def test_has_location_information(self):
+        tokens = list(tokenize("""\
+`define foo""",
+                               file_name="fn",
+                               create_locations=True))
+        self.assertEqual(tokens, [
+            Token(tokenizer.PREPROCESSOR, value="define", location=("fn", (0, 6))),
+            Token(tokenizer.WHITESPACE, value="", location=("fn", (7, 7))),
+            Token(tokenizer.IDENTIFIER, value="foo", location=("fn", (8, 10))),
+        ])

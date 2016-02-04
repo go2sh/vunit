@@ -50,7 +50,7 @@ class VerilogDesignFile(object):
         Parse verilog file
         """
         include_paths = [] if include_paths is None else include_paths
-        tokens = tokenize(code)
+        tokens = tokenize(code, file_name=file_name, create_locations=True)
         included_files = []
         pp_tokens = preprocess(tokens, include_paths=[dirname(file_name)] + include_paths,
                                included_files=included_files)

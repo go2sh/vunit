@@ -16,11 +16,11 @@ TOKENIZER = Tokenizer()
 
 
 def slice_value(token, start=None, end=None):
-    return Token(token.kind, token.value[start:end])
+    return Token(token.kind, token.value[start:end], token.location)
 
 
 def remove_value(token):
-    return Token(token.kind, '')
+    return Token(token.kind, '', token.location)
 
 
 def ignore_value(token):  # pylint: disable=unused-argument
@@ -57,7 +57,7 @@ def new_keyword(name):
 
 def replace_keywords(token):
     if token.value in __KEYWORDS__:
-        return Token(__KEYWORDS__[token.value], '')
+        return Token(__KEYWORDS__[token.value], '', token.location)
     else:
         return token
 
@@ -388,12 +388,14 @@ OTHER = TOKENIZER.add(
 TOKENIZER.finalize()
 
 
-def tokenize(code):
+def tokenize(code, file_name=None, create_locations=False):
     """
     Tokenize Verilog code to be preprocessed
     """
 
-    return TOKENIZER.tokenize(code)
+    return TOKENIZER.tokenize(code=code,
+                              file_name=file_name,
+                              create_locations=create_locations)
 
 
 def main():
